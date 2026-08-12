@@ -1,0 +1,6 @@
+# 自动检测文本文件并统一 LF 换行
+* text=auto
+
+# fnOS 生命周期脚本与 Python 必须保持 LF，否则 CRLF 会使 shebang 失效
+cmd/* text eol=lf
+*.py text eol=lf

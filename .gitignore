@@ -1,0 +1,54 @@
+# =====================================================
+# FnNginxConf - .gitignore
+# =====================================================
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+ENV/
+
+# ---------- fnpack 打包产物 ----------
+*.exe
+*.fpk
+*.fpk.bak
+dist/                 # 构建输出目录（build.sh 产物）
+
+# ---------- 本地测试 / 预览 ----------
+.test/
+*.log
+local-rules.json
+*.local.json
+
+# ---------- 编辑器 / IDE ----------
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*~
+*.tmp
+
+# ---------- 系统文件 ----------
+.DS_Store
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ---------- 环境 / 密钥 ----------
+.env
+.env.*
+!.env.example
+*.secret
+*.pem
+*.key

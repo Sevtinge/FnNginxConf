@@ -1,0 +1,5 @@
+#!/bin/bash
+
+### This script is called before the user configuration is applied.
+
+exit 0

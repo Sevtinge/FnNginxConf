@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>飞牛Nginx转发 · Nginx 反代管理</title>
+  <link rel="stylesheet" href="__APP_BASE__/style.css">
+  <script>window.APP_BASE = "__APP_BASE__";</script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo" aria-hidden="true">
+        <svg viewBox="0 0 48 48" width="30" height="30" fill="none">
+          <defs>
+            <linearGradient id="lg" x1="0" y1="0" x2="48" y2="48">
+              <stop offset="0" stop-color="#22d3ee"/>
+              <stop offset="1" stop-color="#6366f1"/>
+            </linearGradient>
+          </defs>
+          <rect x="6" y="6" width="36" height="36" rx="9" fill="url(#lg)"/>
+          <circle cx="15.5" cy="31" r="2.4" fill="#fff"/>
+          <circle cx="32.5" cy="17" r="2.4" fill="#fff"/>
+          <path d="M17.5 29.5 L29 20.5 M18 30.6 l5.2 1.2 -1.4 5.2 M27.5 18.6 l5.2 1.2 -1.4 5.2" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+      <div class="brand-text">
+        <h1>飞牛Nginx转发</h1>
+        <p>Nginx 反向代理管理</p>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <span id="adminBadge" class="badge badge-admin" hidden>管理员</span>
+      <span id="versionBadge" class="badge">v1.0.0</span>
+    </div>
+  </header>
+
+  <main class="container">
+    <div id="readonlyBanner" class="banner banner-warn" hidden>
+      当前账号为只读权限，仅管理员可修改配置。
+    </div>
+
+    <section class="toolbar">
+      <div class="status-wrap">
+        <span id="nginxPill" class="pill pill-unknown">检测中…</span>
+        <span id="appliedPill" class="pill pill-unknown">…</span>
+      </div>
+      <div class="actions">
+        <button id="btnRefresh" class="btn btn-ghost" title="刷新">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M20 11A8 8 0 1 0 18 16.5"/><path d="M20 5v6h-6"/></svg>
+          刷新
+        </button>
+        <button id="btnNew" class="btn btn-ghost">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+          新增规则
+        </button>
+        <button id="btnApply" class="btn btn-primary">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg>
+          应用配置
+        </button>
+      </div>
+    </section>
+
+    <section id="rulesGrid" class="rules-grid" aria-live="polite"></section>
+
+    <div id="emptyState" class="empty" hidden>
+      <div class="empty-icon" aria-hidden="true">
+        <svg viewBox="0 0 48 48" width="44" height="44" fill="none" stroke="#5b6b86" stroke-width="2"><rect x="9" y="7" width="30" height="14" rx="3"/><rect x="9" y="27" width="30" height="14" rx="3"/><path d="M20 14h11M20 34h11" stroke-linecap="round"/></svg>
+      </div>
+      <h3>还没有规则</h3>
+      <p>点击「新增规则」，填写名称、路径与目标地址，即可为飞牛 Nginx 生成一条反向代理配置。</p>
+    </div>
+
+    <div id="errorPanel" class="error-panel" hidden>
+      <div class="error-panel-head">应用配置失败</div>
+      <pre id="errorDetail" class="error-detail"></pre>
+      <button id="errorClose" class="btn btn-ghost">关闭</button>
+    </div>
+  </main>
+
+  <!-- 新建 / 编辑弹窗 -->
+  <div id="modal" class="modal-backdrop" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+      <header class="modal-head">
+        <h2 id="modalTitle">新增规则</h2>
+        <button id="modalClose" class="icon-btn" aria-label="关闭">✕</button>
+      </header>
+      <form id="ruleForm" novalidate>
+        <div class="field">
+          <label for="fName">名称</label>
+          <input id="fName" name="name" maxlength="100" required placeholder="例如：音乐服务">
+        </div>
+        <div class="field">
+          <label for="fLocation">路径 <span class="hint">访问前缀，如 /music/</span></label>
+          <input id="fLocation" name="location" required placeholder="/music/" spellcheck="false">
+          <div id="locHint" class="field-hint" hidden></div>
+        </div>
+        <div class="field">
+          <span class="field-label">类型</span>
+          <div class="segmented" id="typeSeg" role="tablist">
+            <button type="button" role="tab" data-type="http" class="active">HTTP 地址</button>
+            <button type="button" role="tab" data-type="socket">Unix Socket</button>
+          </div>
+        </div>
+        <div class="field" id="targetField">
+          <label for="fTarget">目标地址</label>
+          <input id="fTarget" name="target" placeholder="http://192.168.1.10:8080" spellcheck="false">
+          <div class="hint">目标服务地址；「路径前缀」默认转发到目标根路径</div>
+        </div>
+        <div class="field" id="socketField" hidden>
+          <label for="fSocket">Socket 路径</label>
+          <input id="fSocket" name="socket" placeholder="/var/run/example.sock" spellcheck="false">
+          <div class="hint">应用监听的 unix socket 绝对路径</div>
+        </div>
+        <details class="advanced">
+          <summary>高级选项</summary>
+          <label class="check">
+            <input type="checkbox" id="fStrip" checked>
+            <span>去掉路径前缀</span>
+          </label>
+          <p class="adv-hint">勾选（默认）：访问 <code>/路径/xxx</code> 转发到目标 <code>/xxx</code>；不勾选：原样转发 <code>/路径/xxx</code>。<br>目标服务挂在根路径时勾选；目标服务要求保留前缀时取消。</p>
+        </details>
+        <p class="tip">💡 若目标应用是单页应用（Vite 构建等），资源路径默认是根路径（如 <code>/assets/...</code>），挂到子路径会 404——请在应用内配置 base path（Vite 的 <code>base: '/路径/'</code>）后重新构建；飞牛 nginx 不支持 HTML 路径重写。</p>
+        <footer class="modal-foot">
+          <button type="button" id="modalCancel" class="btn btn-ghost">取消</button>
+          <button type="submit" id="modalSave" class="btn btn-primary">保存</button>
+        </footer>
+      </form>
+    </div>
+  </div>
+
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+
+  <script src="__APP_BASE__/app.js" defer></script>
+</body>
+</html>

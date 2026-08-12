@@ -1,0 +1,11 @@
+#!/bin/bash
+
+### This script is called after the user upgrades the application.
+### Best-effort reconcile nginx config with stored rules.
+
+if [ -f "$TRIM_APPDEST/server/nginx_cfg.py" ]; then
+    LOG_FILE="${TRIM_PKGVAR}/app.log" RULES_FILE="${TRIM_PKGVAR}/rules.json" \
+        python3 "$TRIM_APPDEST/server/nginx_cfg.py" ensure > /dev/null 2>&1 || true
+fi
+
+exit 0

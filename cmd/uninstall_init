@@ -1,0 +1,18 @@
+#!/bin/bash
+
+### Called before uninstall. Best-effort remove the injected nginx config
+### (conf.d file + ng.conf.zip entry) so the reverse-proxy rules do not
+### survive the app removal. Never fail the uninstall.
+
+PYTHON=/usr/bin/python3
+if [ ! -x "$PYTHON" ]; then
+    PYTHON=/var/apps/python312/target/bin/python3
+fi
+
+if [ -x "$PYTHON" ] && [ -f "$TRIM_APPDEST/server/nginx_cfg.py" ]; then
+    LOG_FILE="${TRIM_PKGVAR}/app.log" \
+        "$PYTHON" "$TRIM_APPDEST/server/nginx_cfg.py" remove \
+        >> "${TRIM_PKGVAR}/app.log" 2>&1 || true
+fi
+
+exit 0
