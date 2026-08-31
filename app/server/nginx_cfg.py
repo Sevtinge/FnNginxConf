@@ -575,11 +575,6 @@ def _strip_nginx_patch(text):
 
 
 def _nginx_map_lines(rules):
-    lines = [
-        "    # >>> FnNginxConf map begin >>>\n",
-        "    map $request_uri $fnnginx_redirect {\n",
-        "        default \"\";\n",
-    ]
     direct = []
     for r in rules:
         if not r.get("enabled", True):
@@ -619,6 +614,15 @@ def _nginx_map_lines(rules):
             direct.append(("        ~^%s(/.*)?(\\?.*)?$ %s%s$1$2;\n" % (esc, base, loc), loc))
     # 长路径优先，避免 /a 抢占 /a/b
     direct.sort(key=lambda item: len(item[1]), reverse=True)
+    lines = [
+        "    # >>> FnNginxConf map begin >>>\n",
+        "    map $request_uri $fnnginx_redirect_80 {\n",
+        "        default \"http://$host:5666$request_uri\";\n",
+    ]
+    lines.extend(line for line, _ in direct)
+    lines.append("    }\n")
+    lines.append("    map $request_uri $fnnginx_redirect_443 {\n")
+    lines.append("        default \"https://$host:5667$request_uri\";\n")
     lines.extend(line for line, _ in direct)
     lines.append("    }\n")
     lines.append("    # <<< FnNginxConf map end <<<\n")
@@ -626,23 +630,16 @@ def _nginx_map_lines(rules):
 
 
 def _nginx_redirect_block(rules):
-    lines = [
+    return [
         "    # >>> FnNginxConf redirect begin >>>\n",
         "    if ($server_port = 80) {\n",
-        "        if ($fnnginx_redirect != \"\") {\n",
-        "            return 302 $fnnginx_redirect;\n",
-        "        }\n",
-        "        return 302 $scheme://$host:5666$request_uri;\n",
+        "        return 302 $fnnginx_redirect_80;\n",
         "    }\n",
         "    if ($server_port = 443) {\n",
-        "        if ($fnnginx_redirect != \"\") {\n",
-        "            return 302 $fnnginx_redirect;\n",
-        "        }\n",
-        "        return 302 $scheme://$host:5667$request_uri;\n",
+        "        return 302 $fnnginx_redirect_443;\n",
         "    }\n",
         "    # <<< FnNginxConf redirect end <<<\n",
     ]
-    return lines
 
 
 def _patched_nginx_text(rules, base_text=None):
