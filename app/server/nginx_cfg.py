@@ -899,13 +899,14 @@ def validate_nginx():
     if not os.path.exists(NGINX_BIN):
         return False, "nginx 二进制不存在: %s" % NGINX_BIN
     prefix = os.path.dirname(os.path.dirname(NGINX_BIN))
-    try:
-        r = subprocess.run([NGINX_BIN, "-t", "-p", prefix],
-                           capture_output=True, text=True, timeout=30)
-    except Exception as e:
-        return False, "nginx -t 执行异常: %s" % e
-    if r.returncode == 0:
-        return True, ""
+    # 与 systemd 保持一致：优先不带 -p，其次带 -p；固定 cwd=/ 避免目录被删导致 getcwd 失败
+    for args in ([NGINX_BIN, "-t"], [NGINX_BIN, "-t", "-p", prefix]):
+        try:
+            r = subprocess.run(args, capture_output=True, text=True, timeout=30, cwd="/")
+        except Exception as e:
+            return False, "nginx -t 执行异常: %s" % e
+        if r.returncode == 0:
+            return True, ""
     detail = (r.stderr or r.stdout or "").strip()[-1200:]
     return False, detail
 
