@@ -2,10 +2,12 @@
 
 ### This script is called after the user upgrades the application.
 ### Best-effort reconcile nginx config with stored rules.
+### If the previous version left a broken nginx.conf patch, restore the
+### original from ng.conf.zip first, then re-apply the current rules.
 
 if [ -f "$TRIM_APPDEST/server/nginx_cfg.py" ]; then
     LOG_FILE="${TRIM_PKGVAR}/app.log" RULES_FILE="${TRIM_PKGVAR}/rules.json" \
-        python3 "$TRIM_APPDEST/server/nginx_cfg.py" ensure > /dev/null 2>&1 || true
+        python3 "$TRIM_APPDEST/server/nginx_cfg.py" repair > /dev/null 2>&1 || true
 fi
 
 exit 0

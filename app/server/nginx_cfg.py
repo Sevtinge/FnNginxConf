@@ -532,13 +532,20 @@ def _nginx_conf_text():
 
 
 def _write_nginx_conf(text, encoding):
+    """原子写 nginx.conf（tmp + fsync + replace），避免中途失败留下空文件。"""
+    tmp = NGINX_CONF + ".fnnginx.tmp"
     try:
-        with open(NGINX_CONF, "wb") as f:
+        with open(tmp, "wb") as f:
             f.write(text.encode(encoding))
             f.flush()
             os.fsync(f.fileno())
+        os.replace(tmp, NGINX_CONF)
     except (OSError, UnicodeEncodeError) as e:
         log("写入 nginx.conf 失败: %s" % e)
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
         return False
     return True
 
@@ -1121,6 +1128,25 @@ def remove_conf():
     return ok, message, detail
 
 
+def repair():
+    """升级后修复：先还原 nginx.conf 与 zip，再按规则重新应用。从不抛异常。"""
+    try:
+        if not os.path.exists(NGINX_BIN):
+            log("nginx 二进制不存在（%s），跳过 repair" % NGINX_BIN)
+            return
+        rules = _load_rules_from_env()
+        enabled = [r for r in rules if r.get("enabled", True)]
+        if enabled:
+            log("repair: 先清理旧补丁，再应用 %d 条规则" % len(enabled))
+            _do_remove(False)
+            apply_conf(rules)
+        else:
+            log("repair: 无启用规则，清理残留配置")
+            remove_conf()
+    except Exception as e:
+        log("repair 异常: %r" % (e,))
+
+
 def ensure(rules):
     """启动时幂等对账：规则与 conf.d/zip 保持同步。从不抛异常。"""
     try:
@@ -1192,6 +1218,9 @@ def main():
         ok, msg, detail = remove_conf()
         log("%s %s" % (msg, detail or ""))
         return 0 if ok else 1
+    if cmd == "repair":
+        repair()
+        return 0
     if cmd == "print-conf":
         sys.stdout.write(generate_conf(_load_rules_from_env()))
         return 0
@@ -1206,7 +1235,7 @@ def main():
             return 1
         sys.stdout.write(patched)
         return 0
-    print("usage: nginx_cfg.py [ensure|remove|print-conf|print-nginx] [--file rules.json]", file=sys.stderr)
+    print("usage: nginx_cfg.py [ensure|repair|remove|print-conf|print-nginx] [--file rules.json]", file=sys.stderr)
     return 2
 
 
