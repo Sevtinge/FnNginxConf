@@ -511,13 +511,15 @@ def _repair_legacy_zip():
     raw = read_zip_entry_bytes(RESTORE_ZIP, pwd, LEGACY_NGINX_ZIP_ENTRY)
     if raw is None:
         return
-    clean = None
-    if LEGACY_ORIG_ZIP_ENTRY in names:
-        clean = read_zip_entry_bytes(RESTORE_ZIP, pwd, LEGACY_ORIG_ZIP_ENTRY)
+    # 只处理旧版 map/redirect 补丁；新版 server redirect 补丁不能清掉
+    has_legacy = (LEGACY_MAP_BEGIN.encode("utf-8") in raw or
+                  LEGACY_REDIRECT_BEGIN.encode("utf-8") in raw)
+    if not has_legacy:
+        if LEGACY_ORIG_ZIP_ENTRY in names:
+            remove_zip_entry(RESTORE_ZIP, pwd, LEGACY_ORIG_ZIP_ENTRY)
+        return
+    clean = _legacy_clean_nginx_bytes(raw)
     if clean is None:
-        clean = _legacy_clean_nginx_bytes(raw)
-    if clean is None:
-        # 没有补丁标记，但可能残留原始备份条目，一并清理
         if LEGACY_ORIG_ZIP_ENTRY in names:
             remove_zip_entry(RESTORE_ZIP, pwd, LEGACY_ORIG_ZIP_ENTRY)
         return
@@ -527,17 +529,6 @@ def _repair_legacy_zip():
         log("已清理旧版 nginx.conf 补丁并恢复 zip 中的 nginx.conf")
     else:
         log("清理旧版 nginx.conf 补丁失败")
-    # 磁盘 nginx.conf 缺失或仍带旧补丁时，一并恢复，避免 nginx -t 预检失败
-    try:
-        with open(NGINX_CONF, "rb") as f:
-            disk = f.read()
-    except OSError:
-        disk = None
-    if disk is None or b"FnNginxConf" in disk:
-        if _write_nginx_bytes(clean):
-            log("已恢复磁盘 nginx.conf")
-        else:
-            log("恢复磁盘 nginx.conf 失败")
 
 
 def _nginx_conf_state():
