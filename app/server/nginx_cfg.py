@@ -608,7 +608,7 @@ def _nginx_redirect_lines(rules):
         loc = normalize_location(r.get("location", ""))
         if not loc or loc == "/":
             continue
-        target = (r.get("target") or "").rstrip("/")
+        target = _clean_target(r.get("target")).rstrip("/")
         if not target:
             continue
         esc = re.escape(loc)
@@ -625,6 +625,17 @@ def _nginx_redirect_lines(rules):
             lines.append("    }\n")
     lines.append("    # <<< FnNginxConf server redirect end <<<\n")
     return lines
+
+
+def _clean_target(target):
+    """兼容前端误存 Markdown 链接：`[http://a](http://a)` -> `http://a`。"""
+    if not isinstance(target, str):
+        return ""
+    t = target.strip()
+    m = re.match(r"^\[(https?://[^\]]+)\]\((https?://[^)]+)\)$", t)
+    if m:
+        t = m.group(2)
+    return t
 
 
 def _patched_nginx_text(rules, base_text=None):
