@@ -597,9 +597,7 @@ def _strip_nginx_redirect(text):
 
 def _nginx_redirect_lines(rules):
     """生成插在 listen 443 与 if ($server_port = 80) 之间的跳转。"""
-    lines = [
-        "    # >>> FnNginxConf server redirect begin >>>\n",
-    ]
+    body = []
     for r in rules:
         if not r.get("enabled", True):
             continue
@@ -613,18 +611,21 @@ def _nginx_redirect_lines(rules):
             continue
         esc = re.escape(loc)
         if r.get("stripPrefix", True):
-            lines.append("    if ($request_uri ~ ^%s(\\?.*)?$) {\n" % esc)
-            lines.append("        return 302 %s;\n" % target)
-            lines.append("    }\n")
-            lines.append("    if ($request_uri ~ ^%s/(.*)$) {\n" % esc)
-            lines.append("        return 302 %s/$1;\n" % target)
-            lines.append("    }\n")
+            body.append("    if ($request_uri ~ ^%s(\\?.*)?$) {\n" % esc)
+            body.append("        return 302 %s;\n" % target)
+            body.append("    }\n")
+            body.append("    if ($request_uri ~ ^%s/(.*)$) {\n" % esc)
+            body.append("        return 302 %s/$1;\n" % target)
+            body.append("    }\n")
         else:
-            lines.append("    if ($request_uri ~ ^%s(/.*)?(\\?.*)?$) {\n" % esc)
-            lines.append("        return 302 %s%s$1$2;\n" % (target, loc))
-            lines.append("    }\n")
-    lines.append("    # <<< FnNginxConf server redirect end <<<\n")
-    return lines
+            body.append("    if ($request_uri ~ ^%s(/.*)?(\\?.*)?$) {\n" % esc)
+            body.append("        return 302 %s%s$1$2;\n" % (target, loc))
+            body.append("    }\n")
+    if not body:
+        return []
+    return (["    # >>> FnNginxConf server redirect begin >>>\n"] +
+            body +
+            ["    # <<< FnNginxConf server redirect end <<<\n"])
 
 
 def _clean_target(target):
