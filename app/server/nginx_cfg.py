@@ -645,12 +645,13 @@ def _patched_nginx_text(rules, base_text=None):
     if not redirect_lines:
         return base
 
-    # 定位 server 块内 listen [::]:443 行，把跳转插到它之后、if ($server_port = 80) 之前
-    anchor = re.search(
-        r"(?m)^\s*listen\s+\[::\]:443\s+ssl\s+http2\s+ipv6only=on\s+default_server;",
-        base)
+    # 定位 server 块内 listen 443 行，把跳转插到它之后、if ($server_port = 80) 之前
+    anchor = re.search(r"(?m)^\s*listen\s+\[::\]:443\b[^\n]*;", base)
     if anchor is None:
-        anchor = re.search(r"(?m)^\s*listen\s+0\.0\.0\.0:443\s+ssl\s+http2\s+default_server;", base)
+        anchor = re.search(r"(?m)^\s*listen\s+0\.0\.0\.0:443\b[^\n]*;", base)
+    if anchor is None:
+        # 找不到 443 监听时，直接插到 if ($server_port = 80) 前面
+        anchor = re.search(r"(?m)^\s*if\s*\(\s*\$server_port\s*=\s*80\s*\)\s*\{", base)
     if anchor is None:
         return None
     insert_at = anchor.end()
