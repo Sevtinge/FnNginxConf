@@ -10,14 +10,10 @@
 
 本应用核心用途：**将飞牛 OS 域名 / IP 下的子路径反向代理转发至自定义本地服务端口或 Unix Socket，直接通过飞牛 OS 网关子路径访问内网自建服务**
 
-### 80/443 按规则路径智能转发
-飞牛系统默认会把 80/443 的请求统一 302 到 5666/5667 网关端口。应用配置规则后，会同时给 `nginx.conf` 打一个可逆补丁：
+### HTTP 规则直接 302 到目标地址
+飞牛系统默认会把 80/443 的请求统一 302 到 5666/5667 网关端口。应用配置 HTTP 规则后，会在 `conf.d` 中生成 `location = /路径` 与 `location ^~ /路径/` 的 302 跳转，例如 `/olink` → `http://cloud.sevtinge.com:5512/...`，直接绕过 5667 网关代理。
 
-- 规则路径命中且目标为**可直连的 HTTP/HTTPS 地址**（非 80/443、非回环地址、目标不带子路径）时，80/443 直接 302 到目标地址，例如 `/olink` → `http://cloud.sevtinge.com:5512/...`；
-- 其余请求保持系统原行为，仍跳转到 5666/5667 网关；
-- Unix Socket 规则、目标为 80/443、回环地址或带子路径的目标，继续走 5666/5667 代理，避免回环或路径语义偏差。
-
-补丁会随 `conf.d` 一起持久化到 `ng.conf.zip`（`nginx.conf` 条目，并保留一份原始 `nginx.conf` 备份），应用失败自动回滚；移除全部规则或卸载应用时自动还原原始 `nginx.conf`。
+Unix Socket 规则仍走 5666/5667 反向代理；应用只写自己的 `conf.d/fnnginx_conf.conf`，不再修改系统 `nginx.conf`。
 
 ### 子路径反向代理挂载
 支持自定义飞牛访问子路径，实现 `https://飞牛IP:端口/自定义路径` 转发到任意本地后端服务：
@@ -37,11 +33,10 @@
 | 文件 | 操作 | 说明 |
 |---|---|---|
 | `/usr/trim/nginx/conf/conf.d/fnnginx_conf.conf` | 写入/删除 | 你的全部反代规则集中在一个文件，nginx 加载它 |
-| `/usr/trim/nginx/conf/nginx.conf` | 可逆补丁/还原 | 80/443 按规则路径智能转发，其余请求保持原跳转 |
 | `/usr/trim/share/.restore/ng.conf.zip` | 增删条目 | 持久化到恢复包，保证重启/恢复后配置仍在 |
 | `systemctl restart trim_nginx` | 重启 | 让新配置生效 |
 
-- **只增删自己的 `conf.d/fnnginx_conf.conf` 条目，并只对 `nginx.conf` 做带标记的可逆补丁**，官方和其他应用注入的配置一律不碰（实测其他条目字节不变）。
+- **只增删自己的 `conf.d/fnnginx_conf.conf` 条目，不修改系统 `nginx.conf`**，官方和其他应用注入的配置一律不碰（实测其他条目字节不变）。
 - 每次写 zip 前自动 `.bak` 备份 + 写入后自检读回，损坏则放弃并回滚。
 
 ### 3. 重启 Nginx = 整个 NAS Web 访问短暂中断
@@ -108,7 +103,7 @@ export default defineConfig({ base: '/mp/' })
 
 1. 打开应用中心 → 飞牛Nginx转发 → 进入管理页面（`/app/FnNginxConf`）。
 2. 点「新增规则」，填写 **名称 / 路径 / 类型 / 目标地址（或 socket 路径）**。
-3. 点「应用配置」——后台完成：生成 conf.d + 补丁 nginx.conf → `nginx -t` 校验 → 同步 `ng.conf.zip` → 重启 `trim_nginx`。前端轮询显示结果。
+3. 点「应用配置」——后台完成：生成 conf.d → `nginx -t` 校验 → 同步 `ng.conf.zip` → 重启 `trim_nginx`。前端轮询显示结果。
 
 ## 生成示例
 
@@ -182,4 +177,4 @@ FnNginxConf/
 
 ## 卸载
 
-卸载时（`cmd/uninstall_init`，在文件删除前执行）自动 **best-effort 删除已注入的 nginx 配置**：移除 `conf.d/fnnginx_conf.conf` 文件、还原 `nginx.conf` 补丁、从 `ng.conf.zip` 删除对应条目、重启 `trim_nginx` 释放配置——反代规则不会在应用卸载后残留。清理失败不会阻断卸载（`|| true` 兜底）。
+卸载时（`cmd/uninstall_init`，在文件删除前执行）自动 **best-effort 删除已注入的 nginx 配置**：移除 `conf.d/fnnginx_conf.conf` 文件、从 `ng.conf.zip` 删除对应条目、重启 `trim_nginx` 释放配置——反代规则不会在应用卸载后残留。清理失败不会阻断卸载（`|| true` 兜底）。

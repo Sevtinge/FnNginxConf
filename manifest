@@ -1,11 +1,11 @@
 appname=FnNginxConf
-version=1.0.4
+version=1.0.5
 display_name=飞牛Nginx转发
 desc=可视化设计并注入飞牛 Nginx 反向代理配置：只需填写名称、路径与目标地址。
 source=thirdparty
 platform=all
-maintainer=kuilei0926
-distributor=kuilei0926
+maintainer=kuilei0926 & Sevtinge
+distributor=kuilei0926 & Sevtinge
 desktop_uidir=ui
 desktop_applaunchname=FnNginxConf.main
 ctl_stop=true

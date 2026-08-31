@@ -8,8 +8,8 @@ FnNginxConf - nginx 配置注入引擎（复用 FnMusicEnhance/nginx_setup.py �
   - ZipCrypto (PKWARE traditional) 加密写 zip；泛化的 read / write / upsert / remove / batch 条目
   - 根据用户规则生成 conf.d/*.conf（防注入校验）
   - 路径冲突检测：不占用官方已有 location（保留命名空间 / 完全相等 / 子路径提示）
-  - 应用编排：写 conf.d + 补丁 nginx.conf -> nginx -t 校验 -> 同步 zip -> 重启 trim_nginx（带回滚）
-  - CLI 子命令：ensure / remove / print-conf / print-nginx
+  - 应用编排：写 conf.d -> nginx -t 校验 -> 同步 zip -> 重启 trim_nginx（带回滚）
+  - CLI 子命令：ensure / repair / remove / print-conf
 """
 
 import io
@@ -40,13 +40,12 @@ CONF_NAME = "fnnginx_conf.conf"
 ZIP_ENTRY = "conf.d/" + CONF_NAME
 CONF_PATH = os.path.join(CONF_DIR, CONF_NAME)
 
-NGINX_ZIP_ENTRY = "nginx.conf"
-NGINX_ORIG_ZIP_ENTRY = "nginx.conf.fnnginx.orig"
-MAP_BEGIN = "# >>> FnNginxConf map begin >>>"
-MAP_END = "# <<< FnNginxConf map end <<<"
-REDIRECT_BEGIN = "# >>> FnNginxConf redirect begin >>>"
-REDIRECT_END = "# <<< FnNginxConf redirect end <<<"
-ORIG_PREFIX = "#FN# "
+LEGACY_NGINX_ZIP_ENTRY = "nginx.conf"
+LEGACY_ORIG_ZIP_ENTRY = "nginx.conf.fnnginx.orig"
+LEGACY_MAP_BEGIN = "# >>> FnNginxConf map begin >>>"
+LEGACY_MAP_END = "# <<< FnNginxConf map end <<<"
+LEGACY_REDIRECT_BEGIN = "# >>> FnNginxConf redirect begin >>>"
+LEGACY_REDIRECT_END = "# <<< FnNginxConf redirect end <<<"
 
 # 系统保留命名空间：统一网关 / CGI（trim_http_cgi.conf 的 location /app/ 与 /cgi），
 # 由系统动态管理，任何子路径都不允许用户占用
@@ -427,6 +426,115 @@ def read_zip_entry_bytes(zip_path, pwd, name):
         return None
 
 
+def _legacy_strip_nginx_patch(text):
+    """移除旧版本注入 nginx.conf 的 map / redirect 补丁。"""
+    if text is None:
+        return None
+    out = []
+    skip_map = False
+    skip_redirect = False
+    for line in text.splitlines(True):
+        if LEGACY_MAP_BEGIN in line:
+            skip_map = True
+            continue
+        if LEGACY_MAP_END in line:
+            skip_map = False
+            continue
+        if LEGACY_REDIRECT_BEGIN in line:
+            skip_redirect = True
+            continue
+        if LEGACY_REDIRECT_END in line:
+            skip_redirect = False
+            continue
+        if skip_map or skip_redirect:
+            continue
+        out.append(line)
+    return "".join(out)
+
+
+def _legacy_clean_nginx_bytes(raw):
+    """旧版补丁的 nginx.conf -> 干净字节；无法识别返回 None。"""
+    if raw is None:
+        return None
+    for enc in ("utf-8", "gb18030", "latin-1"):
+        try:
+            text = raw.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        text = raw.decode("utf-8", "replace")
+    stripped = _legacy_strip_nginx_patch(text)
+    if stripped is None or stripped == text:
+        return None
+    return stripped.encode(enc)
+
+
+def _write_nginx_bytes(raw):
+    """原子写 nginx.conf 原始字节。"""
+    tmp = NGINX_CONF + ".fnnginx.tmp"
+    try:
+        with open(tmp, "wb") as f:
+            f.write(raw)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, NGINX_CONF)
+    except OSError as e:
+        log("写入 nginx.conf 失败: %s" % e)
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return False
+    return True
+
+
+def _repair_legacy_zip():
+    """旧版可能把坏 nginx.conf 写进 ng.conf.zip；新包启动时把它恢复干净。"""
+    if not os.path.exists(RESTORE_ZIP):
+        return
+    pwd = get_password()
+    if not pwd:
+        return
+    try:
+        with zipfile.ZipFile(RESTORE_ZIP) as zf:
+            names = zf.namelist()
+    except Exception:
+        return
+    if LEGACY_NGINX_ZIP_ENTRY not in names:
+        return
+    raw = read_zip_entry_bytes(RESTORE_ZIP, pwd, LEGACY_NGINX_ZIP_ENTRY)
+    if raw is None:
+        return
+    clean = None
+    if LEGACY_ORIG_ZIP_ENTRY in names:
+        clean = read_zip_entry_bytes(RESTORE_ZIP, pwd, LEGACY_ORIG_ZIP_ENTRY)
+    if clean is None:
+        clean = _legacy_clean_nginx_bytes(raw)
+    if clean is None:
+        # 没有补丁标记，但可能残留原始备份条目，一并清理
+        if LEGACY_ORIG_ZIP_ENTRY in names:
+            remove_zip_entry(RESTORE_ZIP, pwd, LEGACY_ORIG_ZIP_ENTRY)
+        return
+    upserts = [(LEGACY_NGINX_ZIP_ENTRY, clean)]
+    removes = [LEGACY_ORIG_ZIP_ENTRY]
+    if update_zip_entries(RESTORE_ZIP, pwd, upserts, removes):
+        log("已清理旧版 nginx.conf 补丁并恢复 zip 中的 nginx.conf")
+    else:
+        log("清理旧版 nginx.conf 补丁失败")
+    # 磁盘 nginx.conf 缺失或仍带旧补丁时，一并恢复，避免 nginx -t 预检失败
+    try:
+        with open(NGINX_CONF, "rb") as f:
+            disk = f.read()
+    except OSError:
+        disk = None
+    if disk is None or b"FnNginxConf" in disk:
+        if _write_nginx_bytes(clean):
+            log("已恢复磁盘 nginx.conf")
+        else:
+            log("恢复磁盘 nginx.conf 失败")
+
+
 # ---------------------------------------------------------------------------
 # 4) conf 生成与校验
 # ---------------------------------------------------------------------------
@@ -484,16 +592,41 @@ def location_block(rule):
     if rule["type"] == "socket":
         sock = rule["socket"]
         target = "http://unix:%s:/" % sock if strip else "http://unix:%s" % sock
-    else:
-        t = rule["target"]
-        target = t.rstrip("/") + "/" if strip else t
+        return (
+            "location %s {\n"
+            "    proxy_pass %s;\n"
+            "    proxy_set_header Host $host;\n"
+            "    proxy_set_header X-Real-IP $remote_addr;\n"
+            "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
+            "}\n" % (loc, target)
+        )
+    # HTTP 规则：80/443 会被系统先 302 到 5666/5667，这里在 5666/5667 上
+    # 直接 302 到目标地址，绕过 5667 网关代理。
+    loc = normalize_location(loc)
+    t = rule["target"].rstrip("/")
+    esc = re.escape(loc)
+    if strip:
+        return (
+            "location = %s {\n"
+            "    return 302 %s/;\n"
+            "}\n"
+            "location = %s/ {\n"
+            "    return 302 %s/;\n"
+            "}\n"
+            "location ^~ %s/ {\n"
+            "    rewrite ^%s/(.*)$ %s/$1 redirect;\n"
+            "}\n" % (loc, t, loc, t, loc, esc, t)
+        )
     return (
-        "location %s {\n"
-        "    proxy_pass %s;\n"
-        "    proxy_set_header Host $host;\n"
-        "    proxy_set_header X-Real-IP $remote_addr;\n"
-        "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
-        "}\n" % (loc, target)
+        "location = %s {\n"
+        "    return 302 %s%s;\n"
+        "}\n"
+        "location = %s/ {\n"
+        "    return 302 %s%s/;\n"
+        "}\n"
+        "location ^~ %s/ {\n"
+        "    rewrite ^%s/(.*)$ %s%s/$1 redirect;\n"
+        "}\n" % (loc, t, loc, loc, t, loc, loc, esc, t, loc)
     )
 
 
@@ -504,331 +637,6 @@ def generate_conf(rules):
         if r.get("enabled", True):
             parts.append(location_block(r))
     return "".join(parts)
-
-
-# ---------------------------------------------------------------------------
-# 5) nginx.conf 补丁：80/443 先按规则路径转发，其余路径保持原跳转
-# ---------------------------------------------------------------------------
-
-
-def _nginx_conf_state():
-    """读取 nginx.conf，返回 (text, encoding)；失败返回 (None, None)。"""
-    try:
-        with open(NGINX_CONF, "rb") as f:
-            raw = f.read()
-    except OSError:
-        return None, None
-    for enc in ("utf-8", "gb18030", "latin-1"):
-        try:
-            return raw.decode(enc), enc
-        except UnicodeDecodeError:
-            continue
-    return raw.decode("utf-8", "replace"), "utf-8"
-
-
-def _nginx_conf_text():
-    text, _ = _nginx_conf_state()
-    return text
-
-
-def _write_nginx_conf(text, encoding):
-    """原子写 nginx.conf（tmp + fsync + replace），避免中途失败留下空文件。"""
-    tmp = NGINX_CONF + ".fnnginx.tmp"
-    try:
-        with open(tmp, "wb") as f:
-            f.write(text.encode(encoding))
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, NGINX_CONF)
-    except (OSError, UnicodeEncodeError) as e:
-        log("写入 nginx.conf 失败: %s" % e)
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-        return False
-    return True
-
-
-def _write_nginx_bytes(raw):
-    """原子写 nginx.conf 原始字节。"""
-    tmp = NGINX_CONF + ".fnnginx.tmp"
-    try:
-        with open(tmp, "wb") as f:
-            f.write(raw)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, NGINX_CONF)
-    except OSError as e:
-        log("写入 nginx.conf 失败: %s" % e)
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-        return False
-    return True
-
-
-def _decode_bytes(raw):
-    for enc in ("utf-8", "gb18030", "latin-1"):
-        try:
-            return raw.decode(enc), enc
-        except UnicodeDecodeError:
-            continue
-    return raw.decode("utf-8", "replace"), "utf-8"
-
-
-def _strip_nginx_patch(text):
-    """移除本应用注入的 map / redirect 补丁，并还原被注释的原始跳转。"""
-    if text is None:
-        return None
-    out = []
-    skip_map = False
-    skip_redirect = False
-    originals = []
-    for line in text.splitlines(True):
-        if MAP_BEGIN in line:
-            skip_map = True
-            continue
-        if MAP_END in line:
-            skip_map = False
-            continue
-        if REDIRECT_BEGIN in line:
-            skip_redirect = True
-            continue
-        if REDIRECT_END in line:
-            skip_redirect = False
-            out.extend(originals)
-            originals = []
-            continue
-        if skip_map or skip_redirect:
-            if skip_redirect and line.startswith(ORIG_PREFIX):
-                originals.append(line[len(ORIG_PREFIX):])
-            continue
-        out.append(line)
-    return "".join(out)
-
-
-def _nginx_map_lines(rules):
-    direct = []
-    for r in rules:
-        if not r.get("enabled", True):
-            continue
-        if r.get("type") != "http":
-            continue
-        loc = normalize_location(r.get("location", ""))
-        if not loc or loc == "/":
-            continue
-        target = r.get("target") or ""
-        try:
-            parts = urlsplit(target)
-        except ValueError:
-            continue
-        if not parts.hostname:
-            continue
-        if parts.username or parts.password or parts.query or parts.fragment:
-            continue   # 带认证/查询/片段的目标保持走代理，避免语义偏差
-        port = parts.port or (443 if parts.scheme == "https" else 80)
-        if port in (80, 443):
-            continue   # 直连会回环，保持走 5666/5667 代理
-        if parts.path not in ("", "/"):
-            continue   # 目标带路径时保持走代理，避免路径语义偏差
-        if parts.hostname in ("127.0.0.1", "localhost", "::1", "0.0.0.0"):
-            continue   # 回环目标无法由浏览器直连，保持走 5666/5667 代理
-        if not re.match(r"^[A-Za-z0-9.-]+$", parts.hostname) and \
-                not re.match(r"^[0-9A-Fa-f:]+$", parts.hostname):
-            continue   # 主机名含特殊字符，不生成直连跳转
-        scheme = parts.scheme or "http"
-        host = "[%s]" % parts.hostname if ":" in parts.hostname else parts.hostname
-        base = "%s://%s:%d" % (scheme, host, port)
-        esc = re.escape(loc)
-        if r.get("stripPrefix", True):
-            direct.append(("        ~^%s(\\?.*)?$ %s/$1;\n" % (esc, base), loc))
-            direct.append(("        ~^%s/(.*)$ %s/$1;\n" % (esc, base), loc))
-        else:
-            direct.append(("        ~^%s(/.*)?(\\?.*)?$ %s%s$1$2;\n" % (esc, base, loc), loc))
-    # 长路径优先，避免 /a 抢占 /a/b
-    direct.sort(key=lambda item: len(item[1]), reverse=True)
-    lines = [
-        "    # >>> FnNginxConf map begin >>>\n",
-        "    map $request_uri $fnnginx_redirect_80 {\n",
-        "        default \"http://$host:5666$request_uri\";\n",
-    ]
-    lines.extend(line for line, _ in direct)
-    lines.append("    }\n")
-    lines.append("    map $request_uri $fnnginx_redirect_443 {\n")
-    lines.append("        default \"https://$host:5667$request_uri\";\n")
-    lines.extend(line for line, _ in direct)
-    lines.append("    }\n")
-    lines.append("    # <<< FnNginxConf map end <<<\n")
-    return lines
-
-
-def _nginx_redirect_block(rules):
-    return [
-        "    # >>> FnNginxConf redirect begin >>>\n",
-        "    if ($server_port = 80) {\n",
-        "        return 302 $fnnginx_redirect_80;\n",
-        "    }\n",
-        "    if ($server_port = 443) {\n",
-        "        return 302 $fnnginx_redirect_443;\n",
-        "    }\n",
-        "    # <<< FnNginxConf redirect end <<<\n",
-    ]
-
-
-def _patched_nginx_text(rules, base_text=None):
-    """计算补丁后的 nginx.conf 全文；失败返回 None。"""
-    base = _strip_nginx_patch(_nginx_conf_text() if base_text is None else base_text)
-    if base is None:
-        return None
-    map_lines = _nginx_map_lines(rules)
-    redirect_lines = _nginx_redirect_block(rules)
-
-    # 在 http 块内、server 块之前插入 map；在 server 块内、原跳转位置插入 redirect
-    http_i = base.find("\nhttp {")
-    if http_i < 0:
-        return None
-    server_i = base.find("\n    server {", http_i)
-    if server_i < 0:
-        return None
-    insert_map_at = server_i
-    insert_redirect_at = server_i
-
-    # 定位原 80/443 跳转：若已存在则在其位置插入补丁，否则插到 server 块开头
-    old_redirect = re.search(
-        r"(?m)^\s*if\s*\(\s*\$server_port\s*=\s*80\s*\)\s*\{.*?"
-        r"^\s*if\s*\(\s*\$server_port\s*=\s*443\s*\)\s*\{.*?^\s*\}",
-        base[server_i:], re.S)
-    if old_redirect:
-        insert_redirect_at = server_i + old_redirect.start()
-    else:
-        # 未找到原跳转时，把补丁插到 server 块第一行之后
-        first_brace = base.find("{", server_i)
-        if first_brace < 0:
-            return None
-        insert_redirect_at = first_brace + 1
-
-    map_text = "".join(map_lines)
-    patched = base[:insert_map_at] + map_text + base[insert_map_at:]
-    # map 插在 server 之前，redirect 插入点需随 map 长度后移
-    insert_redirect_at += len(map_text)
-    patched = patched[:insert_redirect_at] + "".join(redirect_lines) + patched[insert_redirect_at:]
-    if not _sanity_check_patch(patched):
-        return None
-    return patched
-
-
-def _sanity_check_patch(patched):
-    """防止补丁错位：map 块内不允许出现 return / redirect 标记。"""
-    mi = patched.find(MAP_BEGIN)
-    mj = patched.find(MAP_END)
-    if mi >= 0 and mj > mi:
-        block = patched[mi:mj]
-        if "return" in block or REDIRECT_BEGIN in block:
-            return False
-    ri = patched.find(REDIRECT_BEGIN)
-    rj = patched.find(REDIRECT_END)
-    if ri < 0 or rj <= ri:
-        return False
-    return True
-
-
-def _patch_nginx_conf(rules):
-    """给 nginx.conf 注入 map 与 80/443 条件跳转；返回 (ok, message, detail)。"""
-    if not rules:
-        return True, "无启用规则，无需补丁", None
-    text, encoding = _nginx_conf_state()
-    if text is None:
-        return False, "读取 nginx.conf 失败", None
-    patched = _patched_nginx_text(rules, text)
-    if patched is None:
-        return False, "nginx.conf 结构无法识别（未找到 http/server 块或原跳转）", None
-
-    if not _write_nginx_conf(patched, encoding):
-        return False, "写入 nginx.conf 失败", None
-    return True, "nginx.conf 已补丁", None
-
-
-def _restore_nginx_conf():
-    """移除 nginx.conf 中的本应用补丁并还原原跳转；文件缺失时从备份恢复。"""
-    text, encoding = _nginx_conf_state()
-    if text is not None:
-        restored = _strip_nginx_patch(text)
-        if restored == text:
-            return True, "nginx.conf 无需还原"
-        if _write_nginx_conf(restored, encoding):
-            return True, "nginx.conf 已还原"
-        return False, "还原 nginx.conf 失败"
-    raw, label = _recover_nginx_conf()
-    if raw is None:
-        return False, "nginx.conf 缺失且无可用备份"
-    if _write_nginx_bytes(raw):
-        return True, "nginx.conf 已从 %s 恢复" % label
-    return False, "写入 nginx.conf 失败"
-
-
-def _recover_nginx_conf():
-    """尽力恢复原始 nginx.conf：zip 备份 -> .bak -> /tmp/nginx.conf.bad -> 剥离当前补丁。"""
-    candidates = []
-    if os.path.exists(RESTORE_ZIP):
-        pwd = get_password()
-        if pwd:
-            raw = read_zip_entry_bytes(RESTORE_ZIP, pwd, NGINX_ORIG_ZIP_ENTRY)
-            if raw is not None:
-                candidates.append(("zip 原始备份", raw))
-            raw = read_zip_entry_bytes(RESTORE_ZIP, pwd, NGINX_ZIP_ENTRY)
-            if raw is not None:
-                candidates.append(("zip nginx.conf", raw))
-    bak = RESTORE_ZIP + ".bak"
-    if os.path.exists(bak):
-        pwd = get_password()
-        if pwd:
-            raw = read_zip_entry_bytes(bak, pwd, NGINX_ZIP_ENTRY)
-            if raw is not None:
-                candidates.append(("zip .bak", raw))
-    for path in ("/tmp/nginx.conf.bad", NGINX_CONF):
-        try:
-            with open(path, "rb") as f:
-                candidates.append((path, f.read()))
-        except OSError:
-            pass
-    for label, raw in candidates:
-        if b"FnNginxConf" not in raw:
-            return raw, label
-        text, enc = _decode_bytes(raw)
-        stripped = _strip_nginx_patch(text)
-        if stripped != text:
-            return stripped.encode(enc), label + "（剥离补丁）"
-    return None, None
-
-
-def _restore_nginx_from_zip():
-    """从 ng.conf.zip 恢复原始 nginx.conf（若存在备份条目）。返回 (ok, message)。"""
-    raw, label = _recover_nginx_conf()
-    if raw is None:
-        return False, "没有可用的 nginx.conf 备份"
-    if not _write_nginx_bytes(raw):
-        return False, "写入 nginx.conf 失败"
-    return True, "nginx.conf 已从 %s 还原" % label
-
-
-def _restore_nginx_state(old_state):
-    if old_state is None:
-        return
-    old_text, encoding = old_state
-    if old_text is None:
-        return
-    _write_nginx_conf(old_text, encoding)
-
-
-def _restore_nginx_bytes_state(old_state):
-    if old_state is None:
-        return
-    old_raw, _ = old_state
-    if old_raw is None:
-        return
-    _write_nginx_bytes(old_raw)
 
 
 # ---------------------------------------------------------------------------
@@ -1025,27 +833,11 @@ def _do_apply(rules, restart):
             return _do_remove(restart)
 
         content = generate_conf(rules)
-        text, encoding = _nginx_conf_state()
-        if text is None:
-            return False, "读取 nginx.conf 失败，已拒绝应用。", None, False
-        try:
-            with open(NGINX_CONF, "rb") as f:
-                old_nginx_raw = f.read()
-        except OSError:
-            old_nginx_raw = None
-        patched_nginx = _patched_nginx_text(rules, text)
-        if patched_nginx is None:
-            return False, "nginx.conf 结构无法识别（未找到 http/server 块或原跳转），已拒绝应用。", None, False
         pwd = get_password()
         can_persist = bool(pwd) and os.path.exists(RESTORE_ZIP)
 
-        # 幂等：conf.d、nginx.conf 与 zip 都已一致则跳过
-        nginx_ok = text == patched_nginx
-        zip_ok = (not can_persist) or (
-            zip_has_entry(RESTORE_ZIP, ZIP_ENTRY) and
-            zip_has_entry(RESTORE_ZIP, NGINX_ZIP_ENTRY) and
-            zip_has_entry(RESTORE_ZIP, NGINX_ORIG_ZIP_ENTRY))
-        if _current_conf() == content and nginx_ok and zip_ok:
+        # 幂等：conf.d 与 zip 都已一致则跳过
+        if _current_conf() == content and (zip_has_entry(RESTORE_ZIP, ZIP_ENTRY) or not can_persist):
             return True, "配置已是最新，无需变更。", None, False
 
         # 0) 预检：系统当前 nginx 配置必须先通过校验，避免与既有异常叠加
@@ -1053,7 +845,7 @@ def _do_apply(rules, restart):
         if not ok:
             return False, "系统当前 nginx 配置校验失败，已拒绝应用（请先修复系统配置后重试）。", pre_detail, False
 
-        # 1) 写 conf.d 与 nginx.conf（内存留旧内容以便回滚）
+        # 1) 写 conf.d（内存留旧字节以便回滚）
         old_bytes = None
         if os.path.exists(CONF_PATH):
             try:
@@ -1061,49 +853,34 @@ def _do_apply(rules, restart):
                     old_bytes = f.read()
             except OSError:
                 old_bytes = None
-        old_nginx = (text, encoding)
-        old_nginx_bytes = (old_nginx_raw, encoding)
         try:
             write_conf_atomic(content)
         except Exception as e:
             log("写入 %s 失败: %s" % (CONF_PATH, e))
             return False, "写入配置文件失败: %s" % e, None, False
-        ok, msg, detail = _patch_nginx_conf(rules)
-        if not ok:
-            _restore_conf(old_bytes)
-            _restore_nginx_bytes_state(old_nginx_bytes)
-            return False, msg, detail, False
 
         # 2) nginx -t 校验
         ok, detail = validate_nginx()
         if not ok:
             _restore_conf(old_bytes)
-            _restore_nginx_bytes_state(old_nginx_bytes)
             return False, "nginx 配置校验失败，已回滚。", detail, False
 
-        # 3) 同步 zip（无法持久化时降级：仅磁盘配置生效）
+        # 3) 同步 zip（无法持久化时降级：仅 conf.d 生效）
         if can_persist:
-            orig_nginx = text.encode(encoding)
-            if not update_zip_entries(
-                    RESTORE_ZIP, pwd,
-                    [(ZIP_ENTRY, content.encode("utf-8")),
-                     (NGINX_ZIP_ENTRY, patched_nginx.encode(encoding)),
-                     (NGINX_ORIG_ZIP_ENTRY, orig_nginx)]):
+            if not update_zip_entries(RESTORE_ZIP, pwd, [(ZIP_ENTRY, content.encode("utf-8"))]):
                 _restore_conf(old_bytes)
-                _restore_nginx_bytes_state(old_nginx_bytes)
                 return False, "更新 ng.conf.zip 失败，已回滚。", None, False
 
         if not restart:
             # HTTP 路径：响应先发出，再由调用方后台重启——网关即 nginx，同步重启会切断本请求连接
             if can_persist:
-                return True, "配置已应用并持久化到 ng.conf.zip（含 nginx.conf 补丁），nginx 正在后台重启。", None, True
+                return True, "配置已应用并持久化到 ng.conf.zip，nginx 正在后台重启。", None, True
             return True, "配置已应用（未持久化：无法提取 zip 密码或找不到 ng.conf.zip）。", None, True
 
         # 4) 重启
         ok, msg = restart_nginx()
         if not ok:
             _restore_conf(old_bytes)
-            _restore_nginx_bytes_state(old_nginx_bytes)
             if can_persist:
                 try:
                     shutil.copy2(RESTORE_ZIP + ".bak", RESTORE_ZIP)
@@ -1112,7 +889,7 @@ def _do_apply(rules, restart):
             return False, "重启 nginx 失败，已回滚配置。", msg, False
 
         if can_persist:
-            return True, "配置已应用并持久化到 ng.conf.zip（含 nginx.conf 补丁），nginx 已重启。", None, False
+            return True, "配置已应用并持久化到 ng.conf.zip，nginx 已重启。", None, False
         return True, "配置已应用（未持久化：无法提取 zip 密码或找不到 ng.conf.zip）。", None, False
 
 
@@ -1122,13 +899,6 @@ def _do_remove(restart):
     with _lock:
         changed = False
         old_bytes = None
-        old_nginx = _nginx_conf_state()
-        try:
-            with open(NGINX_CONF, "rb") as f:
-                old_nginx_raw = f.read()
-        except OSError:
-            old_nginx_raw = None
-        old_nginx_bytes = (old_nginx_raw, old_nginx[1] if old_nginx[0] is not None else "utf-8")
         if os.path.exists(CONF_PATH):
             try:
                 with open(CONF_PATH, "rb") as f:
@@ -1142,38 +912,13 @@ def _do_remove(restart):
                 log("删除 %s 失败: %s" % (CONF_PATH, e))
                 return False, "删除配置文件失败: %s" % e, None, False
 
-        ok, msg = _restore_nginx_conf()
-        if not ok:
-            ok2, msg2 = _restore_nginx_from_zip()
-            if not ok2:
-                _restore_conf(old_bytes)
-                return False, "还原 nginx.conf 失败: %s；zip 备份还原也失败: %s" % (msg, msg2), None, False
-            log("nginx.conf 补丁剥离失败，已从 zip 备份还原: %s" % msg)
-        if old_nginx != _nginx_conf_state():
-            changed = True
-
         if os.path.exists(RESTORE_ZIP):
             pwd = get_password()
             if not pwd:
                 log("无法提取密码，跳过 zip 条目清理")
-            elif (zip_has_entry(RESTORE_ZIP, ZIP_ENTRY) or
-                  zip_has_entry(RESTORE_ZIP, NGINX_ZIP_ENTRY) or
-                  zip_has_entry(RESTORE_ZIP, NGINX_ORIG_ZIP_ENTRY)):
-                upserts = []
-                removes = [ZIP_ENTRY, NGINX_ORIG_ZIP_ENTRY]
-                if zip_has_entry(RESTORE_ZIP, NGINX_ORIG_ZIP_ENTRY):
-                    # 恢复 zip 中系统原有的 nginx.conf 条目，而不是删除它
-                    orig_raw = read_zip_entry_bytes(RESTORE_ZIP, pwd, NGINX_ORIG_ZIP_ENTRY)
-                    if orig_raw is not None:
-                        upserts.append((NGINX_ZIP_ENTRY, orig_raw))
-                    else:
-                        log("读取 nginx.conf 原始备份失败，将删除 zip 中的 nginx.conf 条目")
-                        removes.append(NGINX_ZIP_ENTRY)
-                else:
-                    removes.append(NGINX_ZIP_ENTRY)
-                if not update_zip_entries(RESTORE_ZIP, pwd, upserts, removes):
+            elif zip_has_entry(RESTORE_ZIP, ZIP_ENTRY):
+                if not remove_zip_entry(RESTORE_ZIP, pwd, ZIP_ENTRY):
                     _restore_conf(old_bytes)   # 还原 conf.d，保持磁盘与 zip 一致
-                    _restore_nginx_bytes_state(old_nginx_bytes)
                     return False, "从 ng.conf.zip 移除条目失败，已还原配置。", None, False
                 changed = True
 
@@ -1211,16 +956,16 @@ def remove_conf():
 
 
 def repair():
-    """升级后修复：先还原 nginx.conf 与 zip，再按规则重新应用。从不抛异常。"""
+    """升级后修复：按规则重新应用。从不抛异常。"""
     try:
         if not os.path.exists(NGINX_BIN):
             log("nginx 二进制不存在（%s），跳过 repair" % NGINX_BIN)
             return
+        _repair_legacy_zip()
         rules = _load_rules_from_env()
         enabled = [r for r in rules if r.get("enabled", True)]
         if enabled:
-            log("repair: 先清理旧补丁，再应用 %d 条规则" % len(enabled))
-            _do_remove(False)
+            log("repair: 应用 %d 条规则" % len(enabled))
             apply_conf(rules)
         else:
             log("repair: 无启用规则，清理残留配置")
@@ -1235,30 +980,21 @@ def ensure(rules):
         if not os.path.exists(NGINX_BIN):
             log("nginx 二进制不存在（%s），跳过 ensure" % NGINX_BIN)
             return
+        _repair_legacy_zip()
         enabled = [r for r in rules if r.get("enabled", True)]
         if enabled:
             content = generate_conf(rules)
-            patched_nginx = _patched_nginx_text(rules)
             need = _current_conf() != content
-            if not need and patched_nginx is not None:
-                need = _nginx_conf_text() != patched_nginx
             if not need and os.path.exists(RESTORE_ZIP):
                 pwd = get_password()
-                need = bool(pwd) and not (
-                    zip_has_entry(RESTORE_ZIP, ZIP_ENTRY) and
-                    zip_has_entry(RESTORE_ZIP, NGINX_ZIP_ENTRY) and
-                    zip_has_entry(RESTORE_ZIP, NGINX_ORIG_ZIP_ENTRY))
+                need = bool(pwd) and not zip_has_entry(RESTORE_ZIP, ZIP_ENTRY)
             if need:
                 log("ensure: 应用规则 (%d 条)" % len(enabled))
                 apply_conf(rules)
             else:
                 log("ensure: 配置已一致，无需变更")
         else:
-            stale = (os.path.exists(CONF_PATH) or
-                     _nginx_conf_text() != _strip_nginx_patch(_nginx_conf_text()) or
-                     zip_has_entry(RESTORE_ZIP, ZIP_ENTRY) or
-                     zip_has_entry(RESTORE_ZIP, NGINX_ZIP_ENTRY) or
-                     zip_has_entry(RESTORE_ZIP, NGINX_ORIG_ZIP_ENTRY))
+            stale = os.path.exists(CONF_PATH) or zip_has_entry(RESTORE_ZIP, ZIP_ENTRY)
             if stale:
                 log("ensure: 移除残留配置")
                 remove_conf()
@@ -1306,18 +1042,7 @@ def main():
     if cmd == "print-conf":
         sys.stdout.write(generate_conf(_load_rules_from_env()))
         return 0
-    if cmd == "print-nginx":
-        rules = _load_rules_from_env()
-        if not rules:
-            sys.stdout.write(_nginx_conf_text() or "")
-            return 0
-        patched = _patched_nginx_text(rules)
-        if patched is None:
-            print("nginx.conf 结构无法识别", file=sys.stderr)
-            return 1
-        sys.stdout.write(patched)
-        return 0
-    print("usage: nginx_cfg.py [ensure|repair|remove|print-conf|print-nginx] [--file rules.json]", file=sys.stderr)
+    print("usage: nginx_cfg.py [ensure|repair|remove|print-conf] [--file rules.json]", file=sys.stderr)
     return 2
 
 
