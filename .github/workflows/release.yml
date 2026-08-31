@@ -2,9 +2,6 @@ name: Build FPK and Release
 
 on:
   push:
-    branches:
-      - main
-      - master
   workflow_dispatch:
 
 permissions:
@@ -60,6 +57,7 @@ jobs:
           ls -la dist/
 
       - name: Upload release assets
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
         uses: softprops/action-gh-release@v2
         with:
           # 版本号来自 manifest；同名 tag 不存在时自动创建，已存在则附加产物
@@ -67,3 +65,10 @@ jobs:
           files: |
             dist/*.fpk
           generate_release_notes: true
+
+      - name: Upload FPK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FnNginxConf-${{ steps.version.outputs.VERSION }}-${{ github.sha }}
+          path: dist/*.fpk
+          if-no-files-found: error
